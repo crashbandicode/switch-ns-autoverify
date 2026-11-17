@@ -1,11 +1,15 @@
 /*
- * ns-autoverify: after Super Smash Bros. Ultimate crashes, run the SAME official content verification that
- * qlaunch's "Check" button runs (ns IApplicationManagerInterface cmd 1003 RequestVerifyApplication, flags 0x7,
- * 0x100000-byte TransferMemory), so the post-crash "Corrupted data has been detected" state is cleared by ns
- * exactly as a manual check would clear it. Real corruption still surfaces: a failed verify changes nothing.
+ * ns-autoverify 0.2 (fast clear). When Super Smash Bros. Ultimate terminates abnormally, ns records a terminate
+ * result and qlaunch then shows "Corrupted data has been detected" at the next launch. This sysmodule asks ns itself
+ * whether that result is a data-corruption result (IReadOnlyApplicationRecordInterface::IsDataCorruptedResult) and,
+ * only when ns positively says it is NOT, clears it at once with ClearApplicationTerminateResult (ns cmd 57). A real
+ * data-corruption result, or any failed query, keeps the dialog. No verify, no big buffer.
  *
- * Fail-safe rules: no fatalThrow / diagAbort anywhere; any init error or unknown firmware -> log (if the SD is
- * up) and exit; a stale busy marker from an interrupted run -> create `disabled` and exit; every wait is bounded.
+ * Optional manual action: `verify-now` runs the official RequestVerifyApplication (as HOME "Check") once.
+ *
+ * Fail-safe rules: no fatalThrow / diagAbort; any init error or firmware other than 23.x -> log and exit; a stale
+ * busy marker from an interrupted run -> create `disabled` and exit; `disabled` is honoured at start and every wake;
+ * every wait is bounded.
  */
 #include <switch.h>
 
@@ -14,22 +18,21 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "nsx.h"
 #include "policy.h"
 
-/* The pgl shell-event observer API (pgl cmd GetShellEventObserver) has two spellings across libnx versions.
- * The console build uses libnx 4.12.0's names; newer libnx sources (e.g. b156b477, used by `make check-host`)
- * renamed them. Same IPC either way. */
+/* libnx 4.12.0 (console build) vs newer libnx sources (`make check-host`) spell the pgl observer API differently. */
 #ifdef AV_LIBNX_NEW_PGL_NAMES
-#define av_pglGetObserver      pglCreateShellEvent
-#define av_pglObserverEvent    pglEventObserverGetShellEvent
+#define av_pglGetObserver       pglCreateShellEvent
+#define av_pglObserverEvent     pglEventObserverGetShellEvent
 #define av_pglObserverEventInfo pglEventObserverGetShellEventInfo
 #else
-#define av_pglGetObserver      pglGetEventObserver
-#define av_pglObserverEvent    pglEventObserverGetProcessEvent
+#define av_pglGetObserver       pglGetEventObserver
+#define av_pglObserverEvent     pglEventObserverGetProcessEvent
 #define av_pglObserverEventInfo pglEventObserverGetProcessEventInfo
 #endif
 
-#define AV_VERSION "0.1.1"
+#define AV_VERSION "0.2.0"
 
 #define CFG_DIR    "sdmc:/config/ns-autoverify"
 #define LOG_DIR    "sdmc:/atmosphere/logs"
@@ -37,14 +40,10 @@
 #define LOG_OLD    LOG_DIR "/ns-autoverify.log.1"
 #define F_DISABLED CFG_DIR "/disabled"
 #define F_OBSERVE  CFG_DIR "/observe-only"
-#define F_CLEAR    CFG_DIR "/clear-terminate-result"
 #define F_TRIGGER  CFG_DIR "/verify-now"
 #define F_BUSY     CFG_DIR "/busy"
 #define F_STATUS   CFG_DIR "/status.txt"
 
-/* We are a background sysmodule, not an applet. Keep the process small: boot2 aborts the boot when an SD
- * sysmodule cannot be created for lack of memory. The 2 MiB verify buffer is taken with svcSetHeapSize only
- * while a verify runs. */
 u32 __nx_applet_type = AppletType_None;
 u32 __nx_fs_num_sessions = 1;
 
@@ -58,7 +57,6 @@ void __libnx_initheap(void) {
     fake_heap_end = inner_heap + sizeof(inner_heap);
 }
 
-/* Nothing at process start: every service comes up in main(), where failures are handled without aborting. */
 void __appInit(void) {}
 void __appExit(void) {}
 
@@ -66,7 +64,6 @@ static bool g_sd;
 static bool g_sm, g_pmdmnt, g_pgl, g_ns, g_observer;
 static PglEventObserver g_obs;
 static Event g_pgl_event;
-static av_tracker_t g_track;
 
 static u64 now_ms(void) {
     return armTicksToNs(armGetSystemTick()) / 1000000ULL;
@@ -118,7 +115,6 @@ static void logf_(const char *fmt, ...) {
     fclose(f);
 }
 
-/* One line, overwritten on every state change; the hardware driver reads it to know when it may launch. */
 static void status_(const char *state, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void status_(const char *state, const char *fmt, ...) {
     if (!g_sd) {
@@ -135,119 +131,133 @@ static void status_(const char *state, const char *fmt, ...) {
     write_text(F_STATUS, line);
 }
 
-typedef struct {
-    bool view_ok;
-    NsApplicationView view;
-    bool term_ok;
-    Result term;
-    bool rec_ok;
-    NsApplicationRecord rec;
-} snap_t;
-
-static void take_snapshot(u64 program_id, snap_t *s, const char *tag) {
-    memset(s, 0, sizeof(*s));
-
-    Result rc = nsGetApplicationView(&s->view, &program_id, 1);
-    s->view_ok = R_SUCCEEDED(rc);
-    char hex[2 * sizeof(NsApplicationView) + 1];
-    hex[0] = '\0';
-    if (s->view_ok) {
-        const u8 *b = (const u8 *)&s->view;
-        for (size_t i = 0; i < sizeof(NsApplicationView); i++) {
-            snprintf(hex + 2 * i, 3, "%02x", b[i]);
-        }
-    }
-
-    Result trc = nsGetApplicationTerminateResult(program_id, &s->term);
-    s->term_ok = R_SUCCEEDED(trc);
-
-    /* Bounded scan of the application records (16 per call, at most 64 calls). */
-    NsApplicationRecord recs[16];
-    for (s32 offset = 0, calls = 0; calls < 64 && !s->rec_ok; calls++) {
-        s32 count = 0;
-        if (R_FAILED(nsListApplicationRecord(recs, 16, offset, &count)) || count <= 0) {
-            break;
-        }
-        for (s32 i = 0; i < count; i++) {
-            if (recs[i].application_id == program_id) {
-                s->rec = recs[i];
-                s->rec_ok = true;
-                break;
-            }
-        }
-        offset += count;
-    }
-
-    logf_("snapshot[%s] id=%016llx view_rc=0x%x flags=0x%08x view=%s term_rc=0x%x term=0x%x rec=%d last_event=%u "
-          "attributes=0x%02x",
-          tag, (unsigned long long)program_id, rc, s->view_ok ? s->view.flags : 0, hex, trc,
-          s->term_ok ? s->term : 0, s->rec_ok ? 1 : 0, s->rec_ok ? s->rec.last_event : 0,
-          s->rec_ok ? s->rec.attributes : 0);
+static void log_snapshot(const char *tag, u64 id, nsx_snap_t *s) {
+    nsx_snapshot(id, s);
+    char line[640];
+    nsx_format(s, id, line, sizeof(line));
+    logf_("snapshot[%s] %s", tag, line);
 }
 
-static bool query_app_running(u64 *out_pid) {
+static bool query_app_running(void) {
     u64 pid = 0;
-    if (R_SUCCEEDED(pmdmntGetApplicationProcessId(&pid)) && pid != 0) {
-        if (out_pid) {
-            *out_pid = pid;
-        }
-        return true;
-    }
-    return false;
+    return R_SUCCEEDED(pmdmntGetApplicationProcessId(&pid)) && pid != 0;
 }
 
-/* Drain pgl shell events into the tracker. Returns true if an application process started. */
-static bool drain_pgl(void) {
-    bool app_started = false;
+/* Drain pgl events. Sets *exited when any process exited (an application exit is what matters; the next
+ * evaluation re-reads ns either way) and *started when an application process started. */
+static void drain_pgl(bool *exited, bool *started) {
     for (u32 n = 0; n < AV_MAX_EVENTS_PER_WAKE; n++) {
         PmProcessEventInfo info;
         memset(&info, 0, sizeof(info));
         if (R_FAILED(av_pglObserverEventInfo(&g_obs, &info)) || info.event == PmProcessEvent_None) {
             break;
         }
-        switch (info.event) {
-            case PmProcessEvent_Start: {
-                u64 app_pid = 0;
-                if (query_app_running(&app_pid) && app_pid == info.process_id) {
-                    u64 program_id = 0;
-                    pmdmntGetProgramId(&program_id, info.process_id);
-                    av_track_app_start(&g_track, info.process_id, program_id);
-                    app_started = true;
-                    logf_("event start application pid=%llu id=%016llx", (unsigned long long)info.process_id,
-                          (unsigned long long)program_id);
-                }
-                break;
+        if (info.event == PmProcessEvent_Exit) {
+            *exited = true;
+        } else if (info.event == PmProcessEvent_Start) {
+            u64 app_pid = 0;
+            if (R_SUCCEEDED(pmdmntGetApplicationProcessId(&app_pid)) && app_pid == info.process_id) {
+                *started = true;
             }
-            case PmProcessEvent_Crash:
-                if (g_track.app_running && info.process_id == g_track.app_pid) {
-                    logf_("event crash application pid=%llu id=%016llx", (unsigned long long)info.process_id,
-                          (unsigned long long)g_track.app_program_id);
-                }
-                av_track_crash(&g_track, info.process_id);
-                break;
-            case PmProcessEvent_Exit:
-                if (g_track.app_running && info.process_id == g_track.app_pid) {
-                    logf_("event exit application pid=%llu crashed=%d", (unsigned long long)info.process_id,
-                          g_track.crash_seen ? 1 : 0);
-                }
-                av_track_exit(&g_track, info.process_id, now_ms());
-                break;
-            default:
-                break;
+        } else if (info.event == PmProcessEvent_Crash) {
+            u64 app_pid = 0;
+            if (R_SUCCEEDED(pmdmntGetApplicationProcessId(&app_pid)) && app_pid == info.process_id) {
+                u64 program_id = 0;
+                pmdmntGetProgramId(&program_id, info.process_id);
+                logf_("event crash application pid=%llu id=%016llx", (unsigned long long)info.process_id,
+                      (unsigned long long)program_id);
+            }
         }
     }
-    return app_started;
 }
+
+/* ---- Fast clear ---------------------------------------------------------------------------------------------- */
+
+static u32 g_clears;
+static u32 g_failed_term;
+static u32 g_last_logged_term = 0xFFFFFFFFu;
+static av_clear_t g_last_logged_gate = AV_CLR_REFUSE;
+
+static void evaluate_clear(u64 id) {
+    /* Cheap first read: nothing to do unless ns holds a terminate result. */
+    Result term = 0;
+    const Result trc = nsGetApplicationTerminateResult(id, &term);
+    if (R_SUCCEEDED(trc) && term == 0) {
+        g_last_logged_term = 0;
+        return;
+    }
+    /* Final verdicts for this value: no repeated full snapshots. Unknown / deferred / observed are re-checked. */
+    if (R_SUCCEEDED(trc) && term == g_last_logged_term &&
+        (g_last_logged_gate == AV_CLR_CORRUPT || g_last_logged_gate == AV_CLR_REFUSE)) {
+        return;
+    }
+
+    nsx_snap_t s;
+    nsx_snapshot(id, &s);
+    av_clear_in_t in = {
+        .observe_only = file_exists(F_OBSERVE),
+        .app_running = query_app_running(),
+        .clears_done = g_clears,
+        .term_ok = R_SUCCEEDED(s.term_rc),
+        .term = s.term,
+        .term_class_ok = R_SUCCEEDED(s.term_class_rc),
+        .term_corrupt = s.term_corrupt,
+        .raw_ok = R_SUCCEEDED(s.raw_rc),
+        .raw = s.raw,
+        .raw_class_ok = R_SUCCEEDED(s.raw_class_rc),
+        .raw_corrupt = s.raw_corrupt,
+        .failed_term = g_failed_term,
+    };
+    const av_clear_t g = av_clear_gate(&in, id);
+
+    /* Log a decision once per (terminate result, gate) pair; deferral while a game runs is not re-logged. */
+    if (s.term != g_last_logged_term || g != g_last_logged_gate) {
+        char line[640];
+        nsx_format(&s, id, line, sizeof(line));
+        logf_("decision gate=%s observe_only=%d app_running=%d clears=%u %s", av_clear_name(g), in.observe_only,
+              in.app_running, g_clears, line);
+        g_last_logged_term = s.term;
+        g_last_logged_gate = g;
+        if (g == AV_CLR_CORRUPT || g == AV_CLR_UNKNOWN) {
+            status_(av_clear_name(g), "id=%016llx term=0x%x raw=0x%x term_class_rc=0x%x raw_class_rc=0x%x",
+                    (unsigned long long)id, s.term, s.raw, s.term_class_rc, s.raw_class_rc);
+        } else if (g == AV_CLR_OBSERVE) {
+            status_("observed", "id=%016llx term=0x%x raw=0x%x would_clear=1", (unsigned long long)id, s.term, s.raw);
+        }
+    }
+    if (g != AV_CLR_GO) {
+        return;
+    }
+
+    write_text(F_BUSY, "clear\n");
+    g_clears++;
+    const Result crc = nsClearApplicationTerminateResult(id);
+    nsx_snap_t after;
+    log_snapshot("after-clear", id, &after);
+    remove_file(F_BUSY);
+    const bool took = R_SUCCEEDED(crc) && R_SUCCEEDED(after.term_rc) && after.term == 0;
+    logf_("clear: ClearApplicationTerminateResult rc=0x%x term 0x%x -> 0x%x flags 0x%08x -> 0x%08x took=%d", crc,
+          s.term, after.term, s.view.flags, after.view.flags, took ? 1 : 0);
+    if (!took) {
+        g_failed_term = s.term; /* never retry the same value this run */
+    }
+    status_(took ? "cleared" : "clear-failed",
+            "id=%016llx term_before=0x%x raw_before=0x%x clear_rc=0x%x term_after=0x%x flags_before=0x%08x "
+            "flags_after=0x%08x clears=%u",
+            (unsigned long long)id, s.term, s.raw, crc, after.term, s.view.flags, after.view.flags, g_clears);
+    g_last_logged_term = after.term;
+}
+
+/* ---- Optional manual verify (`verify-now`) ------------------------------------------------------------------- */
 
 static bool g_poisoned;
 static u32 g_verifies;
 
-static av_verdict_t run_verify(u64 program_id, av_reason_t reason) {
-    snap_t before, after;
-    take_snapshot(program_id, &before, "before");
-
+static void run_verify(u64 id) {
+    nsx_snap_t before, after;
+    log_snapshot("verify-before", id, &before);
     write_text(F_BUSY, "verify\n");
-    status_("verifying", "id=%016llx reason=%s permille=0", (unsigned long long)program_id, av_reason_name(reason));
+    status_("verifying", "id=%016llx permille=0", (unsigned long long)id);
     g_verifies++;
 
     void *heap = NULL;
@@ -255,15 +265,14 @@ static av_verdict_t run_verify(u64 program_id, av_reason_t reason) {
     if (R_FAILED(hrc) || heap == NULL) {
         logf_("verify: heap allocation failed rc=0x%x; not verifying", hrc);
         remove_file(F_BUSY);
-        status_("error", "id=%016llx reason=%s detail=heap rc=0x%x", (unsigned long long)program_id,
-                av_reason_name(reason), hrc);
-        return AV_V_ERROR;
+        status_("error", "id=%016llx detail=heap rc=0x%x", (unsigned long long)id, hrc);
+        return;
     }
 
     NsProgressAsyncResult a;
     memset(&a, 0, sizeof(a));
-    Result rrc = nsRequestVerifyApplication(&a, program_id, AV_VERIFY_FLAGS, heap, AV_VERIFY_TMEM_SIZE);
-    logf_("verify: RequestVerifyApplication(id=%016llx, 0x%x, 0x%x) rc=0x%x", (unsigned long long)program_id,
+    Result rrc = nsRequestVerifyApplication(&a, id, AV_VERIFY_FLAGS, heap, AV_VERIFY_TMEM_SIZE);
+    logf_("verify: RequestVerifyApplication(id=%016llx, 0x%x, 0x%x) rc=0x%x", (unsigned long long)id,
           AV_VERIFY_FLAGS, AV_VERIFY_TMEM_SIZE, rrc);
 
     bool cancelled = false, timed_out = false, leaked = false, done = false;
@@ -281,8 +290,10 @@ static av_verdict_t run_verify(u64 program_id, av_reason_t reason) {
                 break;
             }
             if (R_SUCCEEDED(wr) && idx == 1) {
-                if (drain_pgl() && !cancelled && !timed_out) {
-                    logf_("verify: an application started; cancelling (the flag stays, which is safe)");
+                bool exited = false, started = false;
+                drain_pgl(&exited, &started);
+                if (started && !cancelled && !timed_out) {
+                    logf_("verify: an application started; cancelling");
                     nsProgressAsyncResultCancel(&a);
                     cancelled = true;
                     cancel_at = t;
@@ -294,10 +305,9 @@ static av_verdict_t run_verify(u64 program_id, av_reason_t reason) {
                     timed_out = true;
                     cancel_at = t;
                 }
-                svcSleepThread((u64)AV_VERIFY_SLICE_MS * 1000000ULL); /* never spin on a failing wait */
+                svcSleepThread((u64)AV_VERIFY_SLICE_MS * 1000000ULL);
             }
             if (!cancelled && !timed_out && t - start > AV_VERIFY_MAX_MS) {
-                logf_("verify: exceeded %u ms; cancelling", AV_VERIFY_MAX_MS);
                 nsProgressAsyncResultCancel(&a);
                 timed_out = true;
                 cancel_at = t;
@@ -310,12 +320,9 @@ static av_verdict_t run_verify(u64 program_id, av_reason_t reason) {
                 last_progress = t;
                 NsSystemUpdateProgress p;
                 memset(&p, 0, sizeof(p));
-                Result prc = nsProgressAsyncResultGetProgress(&a, &p, sizeof(p));
+                nsProgressAsyncResultGetProgress(&a, &p, sizeof(p));
                 const int pm = av_progress_permille(p.current_size, p.total_size);
-                logf_("verify: progress rc=0x%x current=%lld total=%lld permille=%d", prc,
-                      (long long)p.current_size, (long long)p.total_size, pm);
-                status_("verifying", "id=%016llx reason=%s permille=%d", (unsigned long long)program_id,
-                        av_reason_name(reason), pm);
+                status_("verifying", "id=%016llx permille=%d", (unsigned long long)id, pm);
             }
         }
         if (done) {
@@ -323,20 +330,14 @@ static av_verdict_t run_verify(u64 program_id, av_reason_t reason) {
             detail_rc = nsProgressAsyncResultGetDetailResult(&a);
             nsProgressAsyncResultClose(&a);
         } else {
-            /* ns never signalled after Cancel: do not block in nsProgressAsyncResultClose (it waits forever).
-             * Drop our handles and never touch the buffer again. */
             serviceClose(&a.s);
             eventClose(&a.event);
         }
-        logf_("verify: done=%d cancelled=%d timed_out=%d leaked=%d get_rc=0x%x detail_rc=0x%x elapsed_ms=%llu",
-              done, cancelled, timed_out, leaked, get_rc, detail_rc, (unsigned long long)(now_ms() - start));
     }
 
     if (leaked) {
         g_poisoned = true;
-        logf_("verify: buffer still owned by ns; no further verifies this run");
     } else {
-        /* ns may still be unmapping its TransferMemory view for a moment after signalling. */
         Result frc = 0;
         for (int attempt = 0; attempt < 5; attempt++) {
             void *dummy = NULL;
@@ -348,72 +349,20 @@ static av_verdict_t run_verify(u64 program_id, av_reason_t reason) {
         }
         if (R_FAILED(frc)) {
             g_poisoned = true;
-            logf_("verify: heap release failed rc=0x%x; no further verifies this run", frc);
         }
     }
 
     const av_verdict_t v = av_verdict(R_SUCCEEDED(rrc), get_rc, detail_rc, cancelled, timed_out);
-    take_snapshot(program_id, &after, "after");
-
-    bool cleared = false;
-    if (av_should_clear(v, file_exists(F_CLEAR), after.term_ok ? after.term : 0)) {
-        Result crc = nsClearApplicationTerminateResult(program_id);
-        cleared = R_SUCCEEDED(crc);
-        logf_("verify: ClearApplicationTerminateResult rc=0x%x", crc);
-        snap_t cleared_snap;
-        take_snapshot(program_id, &cleared_snap, "after-clear");
-    }
-
+    log_snapshot("verify-after", id, &after);
     remove_file(F_BUSY);
-    logf_("verify: verdict=%s (a failed verify changes nothing; the HOME dialog stays for real corruption)",
-          av_verdict_name(v));
-    status_(av_verdict_name(v),
-            "id=%016llx reason=%s request_rc=0x%x get_rc=0x%x detail_rc=0x%x term_before=0x%x term_after=0x%x "
-            "flags_before=0x%08x flags_after=0x%08x cleared=%d",
-            (unsigned long long)program_id, av_reason_name(reason), rrc, get_rc, detail_rc,
-            before.term_ok ? before.term : 0, after.term_ok ? after.term : 0, before.view_ok ? before.view.flags : 0,
-            after.view_ok ? after.view.flags : 0, cleared ? 1 : 0);
-    return v;
+    logf_("verify: verdict=%s get_rc=0x%x detail_rc=0x%x leaked=%d poisoned=%d", av_verdict_name(v), get_rc,
+          detail_rc, leaked, g_poisoned);
+    status_(av_verdict_name(v), "id=%016llx request_rc=0x%x get_rc=0x%x detail_rc=0x%x term_after=0x%x",
+            (unsigned long long)id, rrc, get_rc, detail_rc, after.term);
 }
 
-/* Returns true if the caller should keep the reason pending (deferred). */
-static bool consider(av_reason_t reason, u64 program_id) {
-    av_gate_in_t in = {
-        .observe_only = file_exists(F_OBSERVE),
-        .poisoned = g_poisoned,
-        .app_running = query_app_running(NULL),
-        .verifies_done = g_verifies,
-    };
-    const av_gate_t g = av_gate(&in, reason, program_id);
-    static av_gate_t last_gate = AV_GATE_REFUSE;
-    static av_reason_t last_reason = AV_REASON_NONE;
-    if (!(g == AV_GATE_DEFER && last_gate == AV_GATE_DEFER && last_reason == reason)) {
-        logf_("decision reason=%s id=%016llx gate=%s observe_only=%d app_running=%d verifies=%u poisoned=%d",
-              av_reason_name(reason), (unsigned long long)program_id, av_gate_name(g), in.observe_only,
-              in.app_running, in.verifies_done, in.poisoned);
-    }
-    last_gate = g;
-    last_reason = reason;
-    switch (g) {
-        case AV_GATE_GO:
-            run_verify(program_id, reason);
-            return false;
-        case AV_GATE_OBSERVE: {
-            snap_t s;
-            take_snapshot(program_id, &s, "observe");
-            status_("observed", "id=%016llx reason=%s would_verify=1", (unsigned long long)program_id,
-                    av_reason_name(reason));
-            return false;
-        }
-        case AV_GATE_DEFER:
-            return true;
-        case AV_GATE_REFUSE:
-            return false;
-    }
-    return false;
-}
+/* ---- Init / main --------------------------------------------------------------------------------------------- */
 
-/* sm is already up (main() needs it for the SD). */
 static bool init_services(void) {
     Result rc = setsysInitialize();
     if (R_FAILED(rc)) {
@@ -435,7 +384,6 @@ static bool init_services(void) {
         status_("unsupported-firmware", "fw=%u.%u.%u", fw.major, fw.minor, fw.micro);
         return false;
     }
-
     if (R_FAILED(rc = pmdmntInitialize())) {
         logf_("init: pm:dmnt rc=0x%x", rc);
         return false;
@@ -490,7 +438,6 @@ int main(int argc, char **argv) {
         svcSleepThread((u64)AV_BOOT_DELAY_MS * 1000000ULL);
     }
 
-    /* SD first, so every later failure is logged. Without the SD we cannot honour the kill switch: exit. */
     if (R_FAILED(smInitialize())) {
         return 0;
     }
@@ -514,8 +461,6 @@ int main(int argc, char **argv) {
             status_("disabled", "%s", "");
             goto out;
         case AV_BOOT_EXIT_STALE_MARKER:
-            /* The previous run stopped during init or a verify (crash, fatal or power loss). Never retry
-             * automatically: that is how a boot loop starts. The operator deletes `disabled` to re-arm. */
             logf_("stale busy marker from an interrupted run; creating disabled and exiting");
             write_text(F_DISABLED, "auto: interrupted run\n");
             remove_file(F_BUSY);
@@ -531,32 +476,20 @@ int main(int argc, char **argv) {
         remove_file(F_BUSY);
         goto out;
     }
-
-    av_track_init(&g_track);
-    u64 app_pid = 0;
-    if (query_app_running(&app_pid)) {
-        u64 program_id = 0;
-        pmdmntGetProgramId(&program_id, app_pid);
-        av_track_app_start(&g_track, app_pid, program_id);
-        logf_("start: application already running pid=%llu id=%016llx", (unsigned long long)app_pid,
-              (unsigned long long)program_id);
-    }
-
-    snap_t s0;
-    take_snapshot(AV_SSBU_PROGRAM_ID, &s0, "start");
-    if (!s0.term_ok) {
-        logf_("start: ns GetApplicationTerminateResult unavailable; exiting without acting");
+    nsx_snap_t s0;
+    log_snapshot("start", AV_SSBU_PROGRAM_ID, &s0);
+    if (R_FAILED(s0.term_rc)) {
+        logf_("start: GetApplicationTerminateResult unavailable; exiting without acting");
         remove_file(F_BUSY);
         goto out;
     }
-    remove_file(F_BUSY); /* init survived: from here on, only a verify sets the marker */
+    remove_file(F_BUSY);
     status_("idle", "id=%016llx term=0x%x flags=0x%08x", (unsigned long long)AV_SSBU_PROGRAM_ID, s0.term,
-            s0.view_ok ? s0.view.flags : 0);
+            R_SUCCEEDED(s0.view_rc) ? s0.view.flags : 0);
 
-    /* Start-up pass: a flag may predate this run (crash before boot, or Stage 1 manual start). */
-    bool start_pending = s0.term != 0;
     bool trigger_pending = false;
     u64 trigger_id = AV_SSBU_PROGRAM_ID;
+    u64 fast_until = 0;
 
     for (;;) {
         if (file_exists(F_DISABLED)) {
@@ -564,6 +497,9 @@ int main(int argc, char **argv) {
             status_("disabled", "%s", "cause=file");
             break;
         }
+
+        evaluate_clear(AV_SSBU_PROGRAM_ID);
+
         if (!trigger_pending && file_exists(F_TRIGGER)) {
             char buf[64];
             memset(buf, 0, sizeof(buf));
@@ -574,34 +510,36 @@ int main(int argc, char **argv) {
                 }
                 fclose(tf);
             }
-            remove_file(F_TRIGGER); /* one-shot: consumed once, kept pending in memory while deferred */
+            remove_file(F_TRIGGER);
             trigger_id = av_parse_trigger_id(buf);
             trigger_pending = true;
-            logf_("trigger file consumed id=%016llx", (unsigned long long)trigger_id);
+            logf_("verify-now consumed id=%016llx", (unsigned long long)trigger_id);
         }
-
-        u64 due_id = 0;
-        if (av_track_due(&g_track, now_ms(), &due_id)) {
-            if (!consider(AV_REASON_CRASH, due_id)) {
-                av_track_consume(&g_track);
-                start_pending = false; /* the same flag episode */
+        if (trigger_pending) {
+            if (!av_title_allowed(trigger_id) || g_poisoned || g_verifies >= AV_MAX_VERIFIES_PER_RUN) {
+                logf_("verify-now refused id=%016llx poisoned=%d verifies=%u", (unsigned long long)trigger_id,
+                      g_poisoned, g_verifies);
                 trigger_pending = false;
+            } else if (!query_app_running()) {
+                trigger_pending = false;
+                if (file_exists(F_OBSERVE)) {
+                    logf_("verify-now: observe-only, not verifying");
+                } else {
+                    run_verify(trigger_id);
+                }
             }
-        } else if (start_pending) {
-            start_pending = consider(AV_REASON_TERMINATE_RESULT, AV_SSBU_PROGRAM_ID);
-        } else if (trigger_pending) {
-            trigger_pending = consider(AV_REASON_TRIGGER_FILE, trigger_id);
         }
 
-        /* Sleep until a pgl event or the poll interval; shorter while a crash is settling. */
-        u64 wait_ms = AV_POLL_MS;
-        if (g_track.crash_seen && g_track.crash_exited) {
-            wait_ms = AV_SETTLE_MS;
-        }
+        const u64 t = now_ms();
+        const u64 wait_ms = t < fast_until ? AV_FAST_SLICE_MS : AV_POLL_MS;
         s32 idx = -1;
         Result wr = waitMulti(&idx, wait_ms * 1000000ULL, waiterForEvent(&g_pgl_event));
         if (R_SUCCEEDED(wr) && idx == 0) {
-            drain_pgl();
+            bool exited = false, started = false;
+            drain_pgl(&exited, &started);
+            if (exited) {
+                fast_until = now_ms() + AV_FAST_WINDOW_MS; /* ns/am record the result shortly after the exit */
+            }
         } else if (R_FAILED(wr) && wr != KERNELRESULT(TimedOut)) {
             logf_("wait failed rc=0x%x; exiting", wr);
             break;

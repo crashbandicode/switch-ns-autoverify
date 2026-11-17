@@ -66,7 +66,8 @@ exit `$code
     & scp -q @ssh "${BuildHost}:$remote/test.log" (Join-Path $Out 'test.log')
     if ($code -ne 0) { throw "remote build failed (exit $code; 90 = host tests); see $Out/build.log and test.log" }
     & scp -q -r @ssh "${BuildHost}:$remote/src/out/stage1" (Join-Path $Out 'stage1')
-    foreach ($f in 'ns-autoverify.elf', 'ns-autoverify.nso', 'ns-autoverify.npdm', 'ns-autoverify.map') {
+    & scp -q -r @ssh "${BuildHost}:$remote/src/out/probe" (Join-Path $Out 'probe')
+    foreach ($f in 'ns-autoverify.elf', 'ns-autoverify.nso', 'ns-autoverify.npdm', 'ns-autoverify.map', 'nsav-probe.elf', 'nsav-probe.map') {
         & scp -q @ssh "${BuildHost}:$remote/src/out/$f" (Join-Path $Out $f)
     }
     if (Test-Path (Join-Path $Out "stage1/atmosphere/contents/$tid/flags")) { throw 'stage1 tree contains flags/: refusing' }
@@ -76,10 +77,12 @@ exit `$code
     $sums | Set-Content (Join-Path $Out 'SHA256SUMS.txt')
     $nsp = Get-Item (Join-Path $Out "stage1/atmosphere/contents/$tid/exefs.nsp")
     $tbx = Get-Item (Join-Path $Out "stage1/atmosphere/contents/$tid/toolbox.json")
+    $nro = Get-Item (Join-Path $Out 'probe/switch/nsav-probe/nsav-probe.nro')
     $gcc = & ssh @ssh $BuildHost "$DevkitPro/devkitA64/bin/aarch64-none-elf-gcc --version" 2>&1 | Select-Object -First 1
     [ordered]@{ rev = $full; host = $BuildHost; devkitpro = $DevkitPro; gcc = "$gcc"; booking = $bid
         nsp_bytes = $nsp.Length; nsp_sha256 = (Get-FileHash $nsp.FullName -Algorithm SHA256).Hash.ToLower()
         toolbox_sha256 = (Get-FileHash $tbx.FullName -Algorithm SHA256).Hash.ToLower()
+        probe_nro_bytes = $nro.Length; probe_nro_sha256 = (Get-FileHash $nro.FullName -Algorithm SHA256).Hash.ToLower()
         boot2_flag_present = $false; time = (Get-Date -AsUTC -Format o) } |
         ConvertTo-Json | Set-Content (Join-Path $Out 'build.json')
     Say "ok: exefs.nsp $($nsp.Length) B"
