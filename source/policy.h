@@ -54,13 +54,17 @@ typedef struct {
     uint32_t raw;
     bool raw_class_ok;       /* IsDataCorruptedResult(raw), only needed when raw != 0 */
     bool raw_corrupt;
-    uint32_t failed_term;    /* a term value whose clear already failed this run (0 = none) */
+    uint64_t failed_key;     /* av_clear_key() of a state whose clear already failed this run (0 = none) */
 } av_clear_in_t;
+
+/* Identifies one (term, raw) state. Hardware 2026-11-17: SetApplicationTerminateResult(0x4A8) changed only the raw
+ * value (2101) while 2100 kept reading 0, so both are part of the state. */
+uint64_t av_clear_key(uint32_t term, uint32_t raw);
 
 typedef enum {
     AV_CLR_GO = 0,      /* call ClearApplicationTerminateResult (57) */
     AV_CLR_OBSERVE,     /* would clear; observe-only */
-    AV_CLR_NOTHING,     /* terminate result is 0: nothing to clear */
+    AV_CLR_NOTHING,     /* terminate result and raw result are both 0: nothing to clear */
     AV_CLR_CORRUPT,     /* ns classifies the result as data corruption: keep the dialog */
     AV_CLR_UNKNOWN,     /* an ns query failed: fail closed, keep the dialog */
     AV_CLR_DEFER,       /* an application is running */

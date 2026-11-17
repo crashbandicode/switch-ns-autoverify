@@ -10,7 +10,7 @@
 TITLE_ID := 4200000000004156
 NAME     := ns-autoverify
 PROBE    := nsav-probe
-VERSION  := 0.2.0
+VERSION  := 0.3.0
 
 NEEDS_DKP := $(filter-out test check-host clean,$(if $(MAKECMDGOALS),$(MAKECMDGOALS),all))
 ifneq ($(NEEDS_DKP),)

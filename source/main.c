@@ -32,7 +32,7 @@
 #define av_pglObserverEventInfo pglEventObserverGetProcessEventInfo
 #endif
 
-#define AV_VERSION "0.2.0"
+#define AV_VERSION "0.2.1"
 
 #define CFG_DIR    "sdmc:/config/ns-autoverify"
 #define LOG_DIR    "sdmc:/atmosphere/logs"
@@ -174,20 +174,23 @@ static void drain_pgl(bool *exited, bool *started) {
 /* ---- Fast clear ---------------------------------------------------------------------------------------------- */
 
 static u32 g_clears;
-static u32 g_failed_term;
-static u32 g_last_logged_term = 0xFFFFFFFFu;
+static u64 g_failed_key;
+static u64 g_last_logged_key = UINT64_MAX;
 static av_clear_t g_last_logged_gate = AV_CLR_REFUSE;
 
 static void evaluate_clear(u64 id) {
-    /* Cheap first read: nothing to do unless ns holds a terminate result. */
+    /* Cheap first read of both results (2100 and the raw 2101): nothing to do while both are 0. */
     Result term = 0;
+    u32 raw = 0;
     const Result trc = nsGetApplicationTerminateResult(id, &term);
-    if (R_SUCCEEDED(trc) && term == 0) {
-        g_last_logged_term = 0;
+    const Result rrc = nsx_get_raw_terminate_result(id, &raw);
+    const u64 key = av_clear_key(term, raw);
+    if (R_SUCCEEDED(trc) && R_SUCCEEDED(rrc) && key == 0) {
+        g_last_logged_key = 0;
         return;
     }
-    /* Final verdicts for this value: no repeated full snapshots. Unknown / deferred / observed are re-checked. */
-    if (R_SUCCEEDED(trc) && term == g_last_logged_term &&
+    /* Final verdicts for this state: no repeated full snapshots. Unknown / deferred / observed are re-checked. */
+    if (R_SUCCEEDED(trc) && R_SUCCEEDED(rrc) && key == g_last_logged_key &&
         (g_last_logged_gate == AV_CLR_CORRUPT || g_last_logged_gate == AV_CLR_REFUSE)) {
         return;
     }
@@ -206,17 +209,18 @@ static void evaluate_clear(u64 id) {
         .raw = s.raw,
         .raw_class_ok = R_SUCCEEDED(s.raw_class_rc),
         .raw_corrupt = s.raw_corrupt,
-        .failed_term = g_failed_term,
+        .failed_key = g_failed_key,
     };
     const av_clear_t g = av_clear_gate(&in, id);
+    const u64 skey = av_clear_key(s.term, s.raw);
 
-    /* Log a decision once per (terminate result, gate) pair; deferral while a game runs is not re-logged. */
-    if (s.term != g_last_logged_term || g != g_last_logged_gate) {
-        char line[640];
+    /* Log a decision once per ((term, raw), gate); deferral while a game runs is not re-logged. */
+    if (skey != g_last_logged_key || g != g_last_logged_gate) {
+        char line[704];
         nsx_format(&s, id, line, sizeof(line));
         logf_("decision gate=%s observe_only=%d app_running=%d clears=%u %s", av_clear_name(g), in.observe_only,
               in.app_running, g_clears, line);
-        g_last_logged_term = s.term;
+        g_last_logged_key = skey;
         g_last_logged_gate = g;
         if (g == AV_CLR_CORRUPT || g == AV_CLR_UNKNOWN) {
             status_(av_clear_name(g), "id=%016llx term=0x%x raw=0x%x term_class_rc=0x%x raw_class_rc=0x%x",
@@ -235,17 +239,22 @@ static void evaluate_clear(u64 id) {
     nsx_snap_t after;
     log_snapshot("after-clear", id, &after);
     remove_file(F_BUSY);
-    const bool took = R_SUCCEEDED(crc) && R_SUCCEEDED(after.term_rc) && after.term == 0;
-    logf_("clear: ClearApplicationTerminateResult rc=0x%x term 0x%x -> 0x%x flags 0x%08x -> 0x%08x took=%d", crc,
-          s.term, after.term, s.view.flags, after.view.flags, took ? 1 : 0);
+    const bool took = R_SUCCEEDED(crc) && R_SUCCEEDED(after.term_rc) && R_SUCCEEDED(after.raw_rc) &&
+                      after.term == 0 && after.raw == 0;
+    logf_("clear: ClearApplicationTerminateResult rc=0x%x term 0x%x -> 0x%x raw 0x%x -> 0x%x flags 0x%08x -> 0x%08x "
+          "last_event %u -> %u took=%d",
+          crc, s.term, after.term, s.raw, after.raw, s.view.flags, after.view.flags,
+          s.rec_found ? (unsigned)s.rec.last_event : 0u, after.rec_found ? (unsigned)after.rec.last_event : 0u,
+          took ? 1 : 0);
     if (!took) {
-        g_failed_term = s.term; /* never retry the same value this run */
+        g_failed_key = skey; /* never retry the same state this run */
     }
     status_(took ? "cleared" : "clear-failed",
-            "id=%016llx term_before=0x%x raw_before=0x%x clear_rc=0x%x term_after=0x%x flags_before=0x%08x "
-            "flags_after=0x%08x clears=%u",
-            (unsigned long long)id, s.term, s.raw, crc, after.term, s.view.flags, after.view.flags, g_clears);
-    g_last_logged_term = after.term;
+            "id=%016llx term_before=0x%x raw_before=0x%x clear_rc=0x%x term_after=0x%x raw_after=0x%x "
+            "flags_before=0x%08x flags_after=0x%08x clears=%u",
+            (unsigned long long)id, s.term, s.raw, crc, after.term, after.raw, s.view.flags, after.view.flags,
+            g_clears);
+    g_last_logged_key = av_clear_key(after.term, after.raw);
 }
 
 /* ---- Optional manual verify (`verify-now`) ------------------------------------------------------------------- */

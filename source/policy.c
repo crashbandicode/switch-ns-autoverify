@@ -38,6 +38,10 @@ av_boot_t av_boot_decision(bool disabled_present, bool busy_marker_present) {
     return AV_BOOT_RUN;
 }
 
+uint64_t av_clear_key(uint32_t term, uint32_t raw) {
+    return ((uint64_t)term << 32) | raw;
+}
+
 av_clear_t av_clear_gate(const av_clear_in_t *in, uint64_t program_id) {
     if (!av_title_allowed(program_id) || in->clears_done >= AV_MAX_CLEARS_PER_RUN) {
         return AV_CLR_REFUSE;
@@ -45,24 +49,23 @@ av_clear_t av_clear_gate(const av_clear_in_t *in, uint64_t program_id) {
     if (in->app_running) {
         return AV_CLR_DEFER;
     }
-    if (!in->term_ok) {
+    if (!in->term_ok || !in->raw_ok) {
         return AV_CLR_UNKNOWN;
     }
-    if (in->term == 0) {
+    if (in->term == 0 && in->raw == 0) {
         return AV_CLR_NOTHING;
     }
-    if (in->failed_term != 0 && in->failed_term == in->term) {
+    if (in->failed_key != 0 && in->failed_key == av_clear_key(in->term, in->raw)) {
         return AV_CLR_REFUSE;
     }
     /* ns must positively say "not data corruption" for every non-zero result it reports. */
-    if (!in->term_class_ok) {
-        return AV_CLR_UNKNOWN;
-    }
-    if (in->term_corrupt) {
-        return AV_CLR_CORRUPT;
-    }
-    if (!in->raw_ok) {
-        return AV_CLR_UNKNOWN;
+    if (in->term != 0) {
+        if (!in->term_class_ok) {
+            return AV_CLR_UNKNOWN;
+        }
+        if (in->term_corrupt) {
+            return AV_CLR_CORRUPT;
+        }
     }
     if (in->raw != 0) {
         if (!in->raw_class_ok) {

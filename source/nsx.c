@@ -74,9 +74,11 @@ void nsx_format(const nsx_snap_t *s, u64 application_id, char *out, size_t out_s
     }
     snprintf(out, out_size,
              "id=%016llx view_rc=0x%x flags=0x%08x term_rc=0x%x term=0x%x term_class_rc=0x%x term_corrupt=%d "
-             "raw_rc=0x%x raw=0x%x raw_class_rc=0x%x raw_corrupt=%d rec=%d last_event=%u attributes=0x%02x view=%s",
+             "raw_rc=0x%x raw=0x%x raw_class_rc=0x%x raw_corrupt=%d rec=%d last_event=%u attributes=0x%02x "
+             "last_updated=%llu view=%s",
              (unsigned long long)application_id, s->view_rc, R_SUCCEEDED(s->view_rc) ? s->view.flags : 0, s->term_rc,
              R_SUCCEEDED(s->term_rc) ? s->term : 0, s->term_class_rc, s->term_corrupt ? 1 : 0, s->raw_rc,
              R_SUCCEEDED(s->raw_rc) ? s->raw : 0, s->raw_class_rc, s->raw_corrupt ? 1 : 0, s->rec_found ? 1 : 0,
-             s->rec_found ? (unsigned)s->rec.last_event : 0u, s->rec_found ? (unsigned)s->rec.attributes : 0u, hex);
+             s->rec_found ? (unsigned)s->rec.last_event : 0u, s->rec_found ? (unsigned)s->rec.attributes : 0u,
+             s->rec_found ? (unsigned long long)s->rec.last_updated : 0ULL, hex);
 }

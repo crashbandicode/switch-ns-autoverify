@@ -53,10 +53,28 @@ static void test_clear_gate(void) {
     /* Only the allowlisted title. */
     CHECK(av_clear_gate(&in, 0x0100000000001000ULL) == AV_CLR_REFUSE);
 
-    /* Nothing to clear. */
+    /* Nothing to clear only when both results are 0. */
     in = benign();
     in.term = 0;
+    in.raw = 0;
     CHECK(av_clear_gate(&in, ssbu) == AV_CLR_NOTHING);
+
+    /* Hardware 2026-11-17: SetApplicationTerminateResult(0x4A8) left 2100 at 0 and set only the raw 2101 value.
+     * A raw-only state is acted on, still gated by ns's classification of the raw value. */
+    in = benign();
+    in.term = 0;
+    in.term_class_ok = false; /* a zero term needs no classification */
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_GO);
+    in.raw_corrupt = true;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_CORRUPT);
+    in.raw_corrupt = false;
+    in.raw_class_ok = false;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_UNKNOWN);
+    /* An unreadable raw result is unknown even when term is 0. */
+    in = benign();
+    in.term = 0;
+    in.raw_ok = false;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_UNKNOWN);
 
     /* ns says data corruption: keep the dialog (terminate result or raw result). */
     in = benign();
@@ -104,11 +122,14 @@ static void test_clear_gate(void) {
     in.clears_done = AV_MAX_CLEARS_PER_RUN;
     CHECK(av_clear_gate(&in, ssbu) == AV_CLR_REFUSE);
     in = benign();
-    in.failed_term = 0x4A8;
+    in.failed_key = av_clear_key(0x4A8, 0x4A8);
     CHECK(av_clear_gate(&in, ssbu) == AV_CLR_REFUSE);
     in.term = 0x4A9;
     in.raw = 0x4A9;
     CHECK(av_clear_gate(&in, ssbu) == AV_CLR_GO);
+    CHECK(av_clear_key(0, 0) == 0);
+    CHECK(av_clear_key(0, 0x4A8) != av_clear_key(0x4A8, 0));
+    CHECK(av_clear_key(0x4A8, 0x4A8) == 0x000004A8000004A8ULL);
 
     CHECK(strcmp(av_clear_name(AV_CLR_GO), "clear") == 0);
     CHECK(strcmp(av_clear_name(AV_CLR_CORRUPT), "corrupt-keep") == 0);
