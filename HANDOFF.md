@@ -16,8 +16,11 @@
     released, lane deleted.
 - **Jobs** (staged, not run, no go.txt): `ssbu-switch-remote-work/card-jobs/nsav2-*`. The master is
   `nsav2-p0-probe-cf2390e6/STEPS.md`.
-  - They need `own_install-ns-autoverify-v2.patch` applied in `ssbu-switch-remote`. In a scratch copy the patched
-    suite passed 45/45, and all 8 jobs dry-ran ok on a fake card.
+  - The card tool now allows these paths: `ssbu-switch-remote@0b21b00c` (primary-authorized 12:45Z).
+    - 48 tests OK, including the nsav lifecycle and a TR regression, on ums/mtp/ftp.
+    - Differential vs the previous HEAD: TR install receipts, INSTALL.md and card tree identical.
+    - All 8 jobs dry-ran ok with the committed tool.
+  - STEPS finalized as probe-first, with an abort/rollback point after every step.
   - The old `nsav-*` jobs (0.1 auto-verify) are marked SUPERSEDED.
 - **Superseded builds:** `build-1838af18` (0.1.1 auto-verify) and `build-4e71f3f3` (failed). Do not install either.
 
