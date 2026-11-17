@@ -13,7 +13,20 @@
   - `make test` → 76 checks, 0 failures.
   - `make check-host` → main.c + policy.c type-check against libnx headers (local source `b156b477`) with
     `-Wall -Wextra -Werror`, exit 0. A deliberately wrong call is rejected, so the check is not vacuous.
-- **NOT built.** This host has no devkitPro (`/opt/devkitpro`, `~/devkitpro` and `$DEVKITPRO` are all absent), so
+- **BUILT on the Yoga (2026-11-17 12:16Z), commit `1838af18`.** Toolchain: devkitA64 GCC 16.1.0, libnx 4.12.0,
+  `-Wall -Wextra -Werror`, 0 warnings; host tests 76/0 there too. Built with `tools/build_yoga.ps1`; booking
+  `285044ec` released, lane deleted.
+  - `exefs.nsp` sha256 `b337410566841c955ad5420d6c2dde4a509e7ce86d4f28e37c55acacc55992ff` (96,554 B).
+  - `toolbox.json` sha256 `31a05378b892ea32597f9d295fb9ddb03d6b0f9c33b06a30e79454be03e70da0`.
+  - Artifacts: `smash-training-lobby/artifacts/switch-corrupt-dialog/build-1838af18/`.
+  - `4e71f3f3` did not build: libnx 4.12.0 spells the pgl observer API differently. Its logs are in
+    `build-4e71f3f3/`.
+- **Install job:** `/home/intpa/ssbu-switch-remote-work/card-jobs/nsav-s1-1838af18/` (STEPS.md), plus siblings
+  `nsav-s1b-noflag`, `nsav-t1-snap`, `nsav-t2-active`, `nsav-off`, `nsav-rollback`. Staged, not run, no go.txt.
+  - It needs `own_install-ns-autoverify.patch` applied in `ssbu-switch-remote` first. Without it, own_install.py
+    refuses these paths.
+  - In a scratch copy the patched suite passed 45/45. All six jobs dry-ran ok on a fake UMS card.
+- **Earlier status, superseded by the Yoga build above:** this host has no devkitPro (`/opt/devkitpro`, `~/devkitpro` and `$DEVKITPRO` are all absent), so
   there is no `exefs.nsp` yet. Missing: devkitA64 (aarch64-none-elf gcc + newlib), libnx (built library), and
   `elf2nso`, `npdmtool`, `build_pfs0` (devkitPro `switch-tools`).
   - Options: build on the Yoga host (devkitA64 r30 + libnx 4.12.0, as for `4200000000005352`), or the operator
