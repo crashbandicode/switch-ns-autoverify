@@ -24,6 +24,21 @@
   - The old `nsav-*` jobs (0.1 auto-verify) are marked SUPERSEDED.
 - **Superseded builds:** `build-1838af18` (0.1.1 auto-verify) and `build-4e71f3f3` (failed). Do not install either.
 
+## Update 2026-11-17 13:1xZ: hardware probe 12:47Z, then 0.2.1 / probe 0.3.0 (`5d126774`)
+
+- **Probe 0.2.0 on hardware** (`artifacts/switch-corrupt-dialog/hw2/RESULT.md`, analysed in `hw2/ANALYSIS.md`).
+  - What worked: `nsInitialize`, the classify layout (0x4a8 not corrupt; fs results corrupt), and 2101.
+  - `Set(0x4A8)` changed only `raw` (2101), and `last_event` 16→12. 2100 stayed 0 and the view was unchanged.
+  - Clear zeroed `raw`.
+  - The badge was not checked after the Set. No real flagged state has been dumped yet.
+- **Sysmodule 0.2.1:** acts on term OR raw, each classified by ns; a clear counts as taken only when both read 0.
+- **Probe 0.3.0:** adds `last_updated` and the ZR scope-0 verify experiment.
+- **Build `5d126774`** on the Yoga, 0 warnings, 63/0:
+  - `exefs.nsp` `229fd13749b44cab12d7b052674f8b11df5201131937d900889ea656427b2c72` (97,332 B);
+  - `nsav-probe.nro` `99c11d2501e403d6ea2f19944d24c68897d6b6b658dbe59ecdb3546a5c3fdc98` (241,720 B).
+- **Next:** the controlled real-crash test, job `card-jobs/nsav3-crash-5d126774/STEPS.md`. The nsav2 jobs are
+  superseded.
+
 ## Unknowns (P0 resolves them)
 
 - The `IsDataCorruptedResult` (2) and `GetRawApplicationTerminateResult` (2101) request layouts are assumed, with no
