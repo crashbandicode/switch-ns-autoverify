@@ -16,7 +16,20 @@
 
 #include "policy.h"
 
-#define AV_VERSION "0.1.0"
+/* The pgl shell-event observer API (pgl cmd GetShellEventObserver) has two spellings across libnx versions.
+ * The console build uses libnx 4.12.0's names; newer libnx sources (e.g. b156b477, used by `make check-host`)
+ * renamed them. Same IPC either way. */
+#ifdef AV_LIBNX_NEW_PGL_NAMES
+#define av_pglGetObserver      pglCreateShellEvent
+#define av_pglObserverEvent    pglEventObserverGetShellEvent
+#define av_pglObserverEventInfo pglEventObserverGetShellEventInfo
+#else
+#define av_pglGetObserver      pglGetEventObserver
+#define av_pglObserverEvent    pglEventObserverGetProcessEvent
+#define av_pglObserverEventInfo pglEventObserverGetProcessEventInfo
+#endif
+
+#define AV_VERSION "0.1.1"
 
 #define CFG_DIR    "sdmc:/config/ns-autoverify"
 #define LOG_DIR    "sdmc:/atmosphere/logs"
@@ -189,7 +202,7 @@ static bool drain_pgl(void) {
     for (u32 n = 0; n < AV_MAX_EVENTS_PER_WAKE; n++) {
         PmProcessEventInfo info;
         memset(&info, 0, sizeof(info));
-        if (R_FAILED(pglEventObserverGetShellEventInfo(&g_obs, &info)) || info.event == PmProcessEvent_None) {
+        if (R_FAILED(av_pglObserverEventInfo(&g_obs, &info)) || info.event == PmProcessEvent_None) {
             break;
         }
         switch (info.event) {
@@ -438,12 +451,12 @@ static bool init_services(void) {
         return false;
     }
     g_ns = true;
-    if (R_FAILED(rc = pglCreateShellEvent(&g_obs))) {
+    if (R_FAILED(rc = av_pglGetObserver(&g_obs))) {
         logf_("init: pgl observer rc=0x%x", rc);
         return false;
     }
     g_observer = true;
-    if (R_FAILED(rc = pglEventObserverGetShellEvent(&g_obs, &g_pgl_event))) {
+    if (R_FAILED(rc = av_pglObserverEvent(&g_obs, &g_pgl_event))) {
         logf_("init: pgl observer event rc=0x%x", rc);
         return false;
     }

@@ -73,7 +73,7 @@ test:
 # newlib-only headers libnx includes. Not a substitute for the devkitA64 build.
 LIBNX_SRC ?= /home/intpa/ssbu-switch-remote-research/libnx
 check-host:
-	clang --target=aarch64-linux-gnu -std=gnu11 -fsyntax-only -Wall -Wextra -Werror -D__SWITCH__ \
+	clang --target=aarch64-linux-gnu -std=gnu11 -fsyntax-only -Wall -Wextra -Werror -D__SWITCH__ -DAV_LIBNX_NEW_PGL_NAMES \
 	  -isystem tests/shim -isystem $(LIBNX_SRC)/nx/include -idirafter /usr/include/x86_64-linux-gnu \
 	  -Isource source/main.c source/policy.c
 
