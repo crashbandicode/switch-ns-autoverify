@@ -77,3 +77,7 @@ make test       # host tests of source/policy.c (132 checks)
 make check-host # type-check all C against libnx headers with host clang
 tools/build_yoga.ps1 -Rev <commit> -Out <dir>   # ledger-booked build on the Yoga (devkitA64 GCC 16.1.0, libnx 4.12.0)
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
