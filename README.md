@@ -5,7 +5,8 @@ qlaunch shows "Corrupted data has been detected. Please run a check for corrupt 
 check then takes about 8 minutes and finds nothing. This Atmosphère sysmodule clears that state **immediately**,
 but only when **ns itself** says the result is not a data-corruption result.
 
-- Program ID `4200000000004156` ("AV"). Firmware 23.x only. Atmosphère 1.12.x.
+- Program ID `4200000000004156` ("AV").
+- Tested on: Super Smash Bros. Ultimate 13.0.5 · Switch firmware 23.5.0 · Atmosphère 1.12.2
 - Operator decision 2026-11-17: no 8-minute verify ("skip the 8 minutes because nothing actually happened"). The
   earlier auto-verify design (0.1.x) is superseded.
 - Design and root cause: `smash-training-lobby/artifacts/switch-corrupt-dialog/DESIGN.md` §3B.
