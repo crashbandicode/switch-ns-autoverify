@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* The only title acted on in this release. */
@@ -15,9 +16,17 @@
 #define AV_VERIFY_TMEM_SIZE 0x100000u
 #define AV_HEAP_GRANULE     0x200000u /* svcSetHeapSize granularity; taken only during a manual verify */
 
+/* 0.2.2 fast path: fs 2002-4071..4079 (RomNcaHierarchicalSha256StorageCorrupted). Hardware 2026-11-18 02:09Z: SSBU
+ * failed to start with 0x1FD602 = 2002-4075 RomHierarchicalSha256HashVerificationFailed and the system Check then
+ * found no corrupted data (a transient bad read). The probe's ZL sets this value. */
+#define AV_FS_MODULE            2u
+#define AV_ROM_HS256_DESC_MIN   4071u
+#define AV_ROM_HS256_DESC_MAX   4079u
+#define AV_FAST_PROBE_RESULT    0x1FD602u
+
 #define AV_BOOT_DELAY_MS        10000u
 #define AV_BOOT_WINDOW_MS       60000u
-#define AV_POLL_MS              60000u  /* idle wake-up; no busy loop */
+#define AV_POLL_MS              10000u  /* idle wake-up; no busy loop */
 #define AV_FAST_WINDOW_MS       20000u  /* after an application exit, re-check every second for this long */
 #define AV_FAST_SLICE_MS         1000u
 #define AV_VERIFY_SLICE_MS       5000u
@@ -41,6 +50,30 @@ av_boot_t av_boot_decision(bool disabled_present, bool busy_marker_present);
 
 /* ---- Fast clear ---------------------------------------------------------------------------------------------- */
 
+/* True for fs results 2002-4071..4079 only. */
+bool av_is_rom_hs256(uint32_t result);
+
+/* The epoch file `config/ns-autoverify/strike`. Exactly "armed" or "used 0x<hex>" (optional trailing newline);
+ * anything else, or no file, means no fast clear (fail closed). It is armed only on positive evidence (a clean SSBU
+ * session or an external clear of a flagged state), never by a timer or a reboot. */
+typedef enum {
+    AV_STRIKE_MISSING = 0,
+    AV_STRIKE_GARBLED,
+    AV_STRIKE_ARMED,  /* the epoch's one fast clear is available */
+    AV_STRIKE_USED,   /* a fast clear happened in this epoch: a repeat keeps the dialog */
+} av_strike_t;
+/* `text` NULL = no file. `len` = bytes read (an embedded NUL is garbled). *used_value is set for USED only. */
+av_strike_t av_strike_parse(const char *text, size_t len, uint32_t *used_value);
+/* ARMED or USED (value != 0) only; returns the length written, or -1. */
+int av_strike_format(char *out, size_t size, av_strike_t s, uint32_t value);
+const char *av_strike_name(av_strike_t s);
+
+/* Epoch evidence. A session is clean when the SSBU process exited with no crash event, no flagged state was seen
+ * during it or in the post-exit window, and 2100 and 2101 both read 0 at the end of that window. */
+bool av_session_clean(bool crashed, bool flag_seen, bool read_ok, uint64_t key_after);
+/* A flagged state went to 0 without our own clear: the system Check passed (or a redownload, or probe Y). */
+bool av_external_clear(uint64_t prev_key, uint64_t key, bool cleared_by_us);
+
 /* Everything the clear decision needs, read from ns just before deciding. *_ok = the IPC succeeded. */
 typedef struct {
     bool observe_only;
@@ -55,6 +88,7 @@ typedef struct {
     bool raw_class_ok;       /* IsDataCorruptedResult(raw), only needed when raw != 0 */
     bool raw_corrupt;
     uint64_t failed_key;     /* av_clear_key() of a state whose clear already failed this run (0 = none) */
+    av_strike_t strike;      /* the epoch file, read just before deciding */
 } av_clear_in_t;
 
 /* Identifies one (term, raw) state. Hardware 2026-11-17: SetApplicationTerminateResult(0x4A8) changed only the raw
@@ -69,6 +103,10 @@ typedef enum {
     AV_CLR_UNKNOWN,     /* an ns query failed: fail closed, keep the dialog */
     AV_CLR_DEFER,       /* an application is running */
     AV_CLR_REFUSE,      /* not allowlisted, per-run limit, or this value already failed to clear */
+    AV_CLR_FAST,        /* Rom hash-tree family, epoch armed: mark the epoch used, then call 57 */
+    AV_CLR_OBSERVE_FAST, /* would fast-clear; observe-only */
+    AV_CLR_STRIKE_KEEP, /* Rom hash-tree family again inside a used epoch: keep the dialog for the system Check */
+    AV_CLR_UNARMED,     /* Rom hash-tree family, epoch file missing or garbled: keep the dialog (fail closed) */
 } av_clear_t;
 
 av_clear_t av_clear_gate(const av_clear_in_t *in, uint64_t program_id);

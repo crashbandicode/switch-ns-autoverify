@@ -4,6 +4,8 @@
 /* Note: the per-crash decision is av_clear_gate(); verify is only the optional manual `verify-now` action. */
 
 #include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 
 bool av_fw_supported(uint32_t major, uint32_t minor, uint32_t micro) {
     (void)minor;
@@ -42,6 +44,93 @@ uint64_t av_clear_key(uint32_t term, uint32_t raw) {
     return ((uint64_t)term << 32) | raw;
 }
 
+bool av_is_rom_hs256(uint32_t result) {
+    const uint32_t module = result & 0x1FFu;
+    const uint32_t desc = (result >> 9) & 0x1FFFu;
+    return (result >> 22) == 0 && module == AV_FS_MODULE && desc >= AV_ROM_HS256_DESC_MIN &&
+           desc <= AV_ROM_HS256_DESC_MAX;
+}
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+av_strike_t av_strike_parse(const char *text, size_t len, uint32_t *used_value) {
+    if (text == NULL) {
+        return AV_STRIKE_MISSING;
+    }
+    /* One optional trailing "\n" or "\r\n"; no other whitespace, no embedded NUL. */
+    if (len > 0 && text[len - 1] == '\n') {
+        len--;
+        if (len > 0 && text[len - 1] == '\r') {
+            len--;
+        }
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] == '\0') {
+            return AV_STRIKE_GARBLED;
+        }
+    }
+    if (len == 5 && memcmp(text, "armed", 5) == 0) {
+        return AV_STRIKE_ARMED;
+    }
+    if (len < 8 || len > 15 || memcmp(text, "used 0x", 7) != 0) {
+        return AV_STRIKE_GARBLED;
+    }
+    uint32_t v = 0;
+    for (size_t i = 7; i < len; i++) {
+        const int d = hex_digit(text[i]);
+        if (d < 0) {
+            return AV_STRIKE_GARBLED;
+        }
+        v = (v << 4) | (uint32_t)d;
+    }
+    if (v == 0) {
+        return AV_STRIKE_GARBLED;
+    }
+    if (used_value != NULL) {
+        *used_value = v;
+    }
+    return AV_STRIKE_USED;
+}
+
+int av_strike_format(char *out, size_t size, av_strike_t s, uint32_t value) {
+    int n = -1;
+    if (s == AV_STRIKE_ARMED) {
+        n = snprintf(out, size, "armed\n");
+    } else if (s == AV_STRIKE_USED && value != 0) {
+        n = snprintf(out, size, "used 0x%x\n", (unsigned)value);
+    }
+    return (n < 0 || (size_t)n >= size) ? -1 : n;
+}
+
+const char *av_strike_name(av_strike_t s) {
+    switch (s) {
+        case AV_STRIKE_MISSING: return "missing";
+        case AV_STRIKE_GARBLED: return "garbled";
+        case AV_STRIKE_ARMED: return "armed";
+        case AV_STRIKE_USED: return "used";
+    }
+    return "?";
+}
+
+bool av_session_clean(bool crashed, bool flag_seen, bool read_ok, uint64_t key_after) {
+    return !crashed && !flag_seen && read_ok && key_after == 0;
+}
+
+bool av_external_clear(uint64_t prev_key, uint64_t key, bool cleared_by_us) {
+    return prev_key != 0 && key == 0 && !cleared_by_us;
+}
+
 av_clear_t av_clear_gate(const av_clear_in_t *in, uint64_t program_id) {
     if (!av_title_allowed(program_id) || in->clears_done >= AV_MAX_CLEARS_PER_RUN) {
         return AV_CLR_REFUSE;
@@ -58,27 +147,26 @@ av_clear_t av_clear_gate(const av_clear_in_t *in, uint64_t program_id) {
     if (in->failed_key != 0 && in->failed_key == av_clear_key(in->term, in->raw)) {
         return AV_CLR_REFUSE;
     }
-    /* ns must positively say "not data corruption" for every non-zero result it reports. */
-    if (in->term != 0) {
-        if (!in->term_class_ok) {
-            return AV_CLR_UNKNOWN;
-        }
-        if (in->term_corrupt) {
-            return AV_CLR_CORRUPT;
-        }
+    /* ns must classify every non-zero result it reports. */
+    if ((in->term != 0 && !in->term_class_ok) || (in->raw != 0 && !in->raw_class_ok)) {
+        return AV_CLR_UNKNOWN;
     }
-    if (in->raw != 0) {
-        if (!in->raw_class_ok) {
-            return AV_CLR_UNKNOWN;
-        }
-        if (in->raw_corrupt) {
-            return AV_CLR_CORRUPT;
-        }
+    const bool corrupt = (in->term != 0 && in->term_corrupt) || (in->raw != 0 && in->raw_corrupt);
+    if (!corrupt) {
+        /* 0.2.1 path: ns positively says "not data corruption". */
+        return in->observe_only ? AV_CLR_OBSERVE : AV_CLR_GO;
     }
-    if (in->observe_only) {
-        return AV_CLR_OBSERVE;
+    /* 0.2.2 fast path: only when every non-zero value is in the Rom hash-tree family. */
+    if ((in->term != 0 && !av_is_rom_hs256(in->term)) || (in->raw != 0 && !av_is_rom_hs256(in->raw))) {
+        return AV_CLR_CORRUPT;
     }
-    return AV_CLR_GO;
+    switch (in->strike) {
+        case AV_STRIKE_ARMED: return in->observe_only ? AV_CLR_OBSERVE_FAST : AV_CLR_FAST;
+        case AV_STRIKE_USED: return AV_CLR_STRIKE_KEEP;
+        case AV_STRIKE_MISSING:
+        case AV_STRIKE_GARBLED: break;
+    }
+    return AV_CLR_UNARMED;
 }
 
 const char *av_clear_name(av_clear_t c) {
@@ -90,6 +178,10 @@ const char *av_clear_name(av_clear_t c) {
         case AV_CLR_UNKNOWN: return "unknown-keep";
         case AV_CLR_DEFER: return "defer";
         case AV_CLR_REFUSE: return "refuse";
+        case AV_CLR_FAST: return "fast-clear";
+        case AV_CLR_OBSERVE_FAST: return "observe-fast";
+        case AV_CLR_STRIKE_KEEP: return "strike-keep";
+        case AV_CLR_UNARMED: return "unarmed-keep";
     }
     return "?";
 }

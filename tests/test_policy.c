@@ -136,6 +136,151 @@ static void test_clear_gate(void) {
     CHECK(strcmp(av_clear_name(AV_CLR_UNKNOWN), "unknown-keep") == 0);
 }
 
+/* Hardware 2026-11-18 02:09Z (hw6): term = raw = 0x1FD602 (2002-4075), ns: corrupt. */
+static av_clear_in_t rom_hs256(av_strike_t strike) {
+    av_clear_in_t in = benign();
+    in.term = AV_FAST_PROBE_RESULT;
+    in.raw = AV_FAST_PROBE_RESULT;
+    in.term_corrupt = true;
+    in.raw_corrupt = true;
+    in.strike = strike;
+    return in;
+}
+
+static void test_rom_hs256_family(void) {
+    CHECK(av_is_rom_hs256(0x1FD602u)); /* 2002-4075, the hw6 value */
+    CHECK(av_is_rom_hs256((4071u << 9) | 2u));
+    CHECK(av_is_rom_hs256((4079u << 9) | 2u));
+    CHECK(!av_is_rom_hs256((4070u << 9) | 2u));
+    CHECK(!av_is_rom_hs256((4080u << 9) | 2u));
+    CHECK(!av_is_rom_hs256((4075u << 9) | 3u)); /* same description, another module */
+    CHECK(!av_is_rom_hs256((4535u << 9) | 2u)); /* the unrenamed server result */
+    CHECK(!av_is_rom_hs256(0x1F4002u));         /* 2002-4000 */
+    CHECK(!av_is_rom_hs256(0x23F402u));         /* 2002-4602 */
+    CHECK(!av_is_rom_hs256(AV_PROBE_RESULT));
+    CHECK(!av_is_rom_hs256(0));
+    CHECK(!av_is_rom_hs256(0x1FD602u | (1u << 22))); /* bits above a Result */
+}
+
+static void test_fast_gate(void) {
+    const uint64_t ssbu = AV_SSBU_PROGRAM_ID;
+    /* The first strike in an armed epoch clears. */
+    av_clear_in_t in = rom_hs256(AV_STRIKE_ARMED);
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_FAST);
+    /* A repeat inside the epoch keeps the dialog. */
+    in = rom_hs256(AV_STRIKE_USED);
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_STRIKE_KEEP);
+    /* A missing or garbled epoch file fails closed. */
+    in = rom_hs256(AV_STRIKE_MISSING);
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_UNARMED);
+    in = rom_hs256(AV_STRIKE_GARBLED);
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_UNARMED);
+    /* A non-Rom corruption family keeps, even when armed. */
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.term = 0x1F4002u;
+    in.raw = 0x1F4002u;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_CORRUPT);
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.raw = 0x23F402u; /* term in the family, raw in another corrupt family */
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_CORRUPT);
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.raw = AV_PROBE_RESULT; /* mixed with a non-corrupt value: not the observed shape */
+    in.raw_corrupt = false;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_CORRUPT);
+    /* raw-only (term 0) in the family is still the family. */
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.term = 0;
+    in.term_corrupt = false;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_FAST);
+    /* An application running means no action. */
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.app_running = true;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_DEFER);
+    /* Observe-only logs only. */
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.observe_only = true;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_OBSERVE_FAST);
+    in.strike = AV_STRIKE_USED;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_STRIKE_KEEP);
+    /* Failed queries, limits and refusals outrank the fast path. */
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.term_class_ok = false;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_UNKNOWN);
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.raw_ok = false;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_UNKNOWN);
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.clears_done = AV_MAX_CLEARS_PER_RUN;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_REFUSE);
+    in = rom_hs256(AV_STRIKE_ARMED);
+    in.failed_key = av_clear_key(AV_FAST_PROBE_RESULT, AV_FAST_PROBE_RESULT);
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_REFUSE);
+    CHECK(av_clear_gate(&in, 0x0100000000001000ULL) == AV_CLR_REFUSE);
+    /* The 0.2.1 non-corrupt path ignores the epoch entirely. */
+    in = benign();
+    in.strike = AV_STRIKE_MISSING;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_GO);
+    in.strike = AV_STRIKE_USED;
+    CHECK(av_clear_gate(&in, ssbu) == AV_CLR_GO);
+    CHECK(strcmp(av_clear_name(AV_CLR_FAST), "fast-clear") == 0);
+    CHECK(strcmp(av_clear_name(AV_CLR_STRIKE_KEEP), "strike-keep") == 0);
+    CHECK(strcmp(av_clear_name(AV_CLR_UNARMED), "unarmed-keep") == 0);
+}
+
+static av_strike_t parse(const char *s, uint32_t *v) {
+    return av_strike_parse(s, s ? strlen(s) : 0, v);
+}
+
+static void test_strike_file(void) {
+    uint32_t v = 0;
+    CHECK(av_strike_parse(NULL, 0, &v) == AV_STRIKE_MISSING);
+    CHECK(parse("armed", &v) == AV_STRIKE_ARMED);
+    CHECK(parse("armed\n", &v) == AV_STRIKE_ARMED);
+    CHECK(parse("armed\r\n", &v) == AV_STRIKE_ARMED);
+    CHECK(parse("used 0x1fd602\n", &v) == AV_STRIKE_USED && v == 0x1FD602u);
+    CHECK(parse("used 0x1FD602", &v) == AV_STRIKE_USED && v == 0x1FD602u);
+    /* Garbled: anything else fails closed. */
+    CHECK(parse("", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("\n", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("Armed\n", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("armed\n\n", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse(" armed", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("armedx", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("used", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("used 0x", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("used 0x0", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("used 0x1fd60g", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("used 1fd602", &v) == AV_STRIKE_GARBLED);
+    CHECK(parse("used 0x123456789", &v) == AV_STRIKE_GARBLED);
+    CHECK(av_strike_parse("armed\0x", 7, &v) == AV_STRIKE_GARBLED);
+    static const char nul_inside[5] = {'a', 'r', '\0', 'e', 'd'};
+    CHECK(av_strike_parse(nul_inside, sizeof(nul_inside), &v) == AV_STRIKE_GARBLED);
+    /* Format round-trips; only ARMED and a non-zero USED are writable. */
+    char buf[32];
+    CHECK(av_strike_format(buf, sizeof(buf), AV_STRIKE_ARMED, 0) == 6 && parse(buf, &v) == AV_STRIKE_ARMED);
+    v = 0;
+    CHECK(av_strike_format(buf, sizeof(buf), AV_STRIKE_USED, 0x1FD602u) > 0 && parse(buf, &v) == AV_STRIKE_USED &&
+          v == 0x1FD602u);
+    CHECK(av_strike_format(buf, sizeof(buf), AV_STRIKE_USED, 0) == -1);
+    CHECK(av_strike_format(buf, sizeof(buf), AV_STRIKE_GARBLED, 1) == -1);
+    CHECK(av_strike_format(buf, sizeof(buf), AV_STRIKE_MISSING, 1) == -1);
+    CHECK(av_strike_format(buf, 4, AV_STRIKE_ARMED, 0) == -1);
+    CHECK(strcmp(av_strike_name(AV_STRIKE_USED), "used") == 0);
+}
+
+static void test_epoch_evidence(void) {
+    CHECK(av_session_clean(false, false, true, 0));
+    CHECK(!av_session_clean(true, false, true, 0));  /* a crash event */
+    CHECK(!av_session_clean(false, true, true, 0));  /* a flag seen during the session or the post-exit window */
+    CHECK(!av_session_clean(false, false, false, 0)); /* the final read failed */
+    CHECK(!av_session_clean(false, false, true, av_clear_key(0, AV_PROBE_RESULT)));
+    const uint64_t k = av_clear_key(AV_FAST_PROBE_RESULT, AV_FAST_PROBE_RESULT);
+    CHECK(av_external_clear(k, 0, false));
+    CHECK(!av_external_clear(k, 0, true));  /* our own clear */
+    CHECK(!av_external_clear(0, 0, false)); /* nothing was flagged */
+    CHECK(!av_external_clear(k, k, false)); /* still flagged */
+}
+
 static void test_verdict(void) {
     CHECK(av_verdict(true, 0, 0, false, false) == AV_V_PASS);
     CHECK(av_verdict(true, 0x1234, 0, false, false) == AV_V_FAIL);
@@ -172,6 +317,10 @@ static void test_misc(void) {
 int main(void) {
     test_firmware_allowlist_boot();
     test_clear_gate();
+    test_rom_hs256_family();
+    test_fast_gate();
+    test_strike_file();
+    test_epoch_evidence();
     test_verdict();
     test_trigger_parse();
     test_misc();

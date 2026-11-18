@@ -6,10 +6,12 @@
  *      IsDataCorruptedResult on both (ns:ro 2), the application record; plus a reference classification table.
  *   X  SET: SetApplicationTerminateResult(SSBU, 0x4A8) (cmd 56), only if the current terminate result is 0; then dump.
  *   Y  CLEAR: ClearApplicationTerminateResult(SSBU) (cmd 57); then dump.
+ *   ZL SET: SetApplicationTerminateResult(SSBU, 0x1FD602) (the hw6 Rom hash-tree value), only if 2100 and 2101 both
+ *      read 0; then dump. Test-only (it raises the corrupt-data state); needs its own go.
  *   +  exit.
  *
  * Every line also goes to sdmc:/atmosphere/logs/nsav-probe.log (appended; never rotated, a run is ~10 lines).
- * The probe writes ns state only on X and Y, only for SSBU, and only the terminate result.
+ * The probe writes ns state only on X, ZL and Y, only for SSBU, and only the terminate result.
  */
 #include <switch.h>
 
@@ -22,7 +24,7 @@
 #include "nsx.h"
 #include "policy.h"
 
-#define PROBE_VERSION "0.3.0"
+#define PROBE_VERSION "0.4.0"
 #define LOG_DIR "sdmc:/atmosphere/logs"
 #define LOG_PATH LOG_DIR "/nsav-probe.log"
 
@@ -112,9 +114,9 @@ static void verify_experiment(PadState *pad) {
 }
 
 static void reference_table(void) {
-    /* How ns classifies known results: 0, SSBU's Data Abort, and two fs data-corruption results
-     * (module 2, descriptions 4000 and 4602). Validates the IsDataCorruptedResult request layout. */
-    static const u32 refs[] = {0x0u, AV_PROBE_RESULT, 0x1F4002u, 0x23F402u};
+    /* How ns classifies known results: 0, SSBU's Data Abort, and three fs data-corruption results
+     * (module 2, descriptions 4000, 4602 and 4075). Validates the IsDataCorruptedResult request layout. */
+    static const u32 refs[] = {0x0u, AV_PROBE_RESULT, 0x1F4002u, 0x23F402u, AV_FAST_PROBE_RESULT};
     for (size_t i = 0; i < sizeof(refs) / sizeof(refs[0]); i++) {
         bool corrupt = false;
         Result rc = nsx_is_data_corrupted(refs[i], &corrupt);
@@ -134,7 +136,9 @@ int main(int argc, char **argv) {
     mkdir(LOG_DIR, 0777);
 
     out("nsav-probe %s  SSBU %016llx", PROBE_VERSION, (unsigned long long)AV_SSBU_PROGRAM_ID);
-    out("A=dump  X=set 0x%x (only if 0)  Y=clear (cmd 57)  ZR=verify scope 0 (B cancels)  +=exit", AV_PROBE_RESULT);
+    out("A=dump  X=set 0x%x (only if 0)  ZL=set 0x%x (only if both 0)  Y=clear (cmd 57)  ZR=verify scope 0 (B "
+        "cancels)  +=exit",
+        AV_PROBE_RESULT, AV_FAST_PROBE_RESULT);
 
     Result rc = nsInitialize();
     out("hos=%u.%u.%u nsInitialize rc=0x%x", HOSVER_MAJOR(hosversionGet()), HOSVER_MINOR(hosversionGet()),
@@ -167,6 +171,19 @@ int main(int argc, char **argv) {
                 Result src = nsSetApplicationTerminateResult(AV_SSBU_PROGRAM_ID, AV_PROBE_RESULT);
                 out("SET SetApplicationTerminateResult(0x%x) rc=0x%x", AV_PROBE_RESULT, src);
                 dump("after-set");
+            }
+        } else if (ns_ok && (down & HidNpadButton_ZL)) {
+            g_seq++;
+            Result cur = 0;
+            u32 raw = 0;
+            Result grc = nsGetApplicationTerminateResult(AV_SSBU_PROGRAM_ID, &cur);
+            Result rrc = nsx_get_raw_terminate_result(AV_SSBU_PROGRAM_ID, &raw);
+            if (R_FAILED(grc) || R_FAILED(rrc) || cur != 0 || raw != 0) {
+                out("SET-ZL refused: term rc=0x%x 0x%x raw rc=0x%x 0x%x (both must read 0)", grc, cur, rrc, raw);
+            } else {
+                Result src = nsSetApplicationTerminateResult(AV_SSBU_PROGRAM_ID, AV_FAST_PROBE_RESULT);
+                out("SET-ZL SetApplicationTerminateResult(0x%x) rc=0x%x", AV_FAST_PROBE_RESULT, src);
+                dump("after-set-zl");
             }
         } else if (ns_ok && (down & HidNpadButton_Y)) {
             g_seq++;

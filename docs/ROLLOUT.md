@@ -51,6 +51,18 @@ left showing, the operator's standing rule allows HOME → Check → Done.
 - **If HOME is not reachable:** power-cycle once (the stale-marker guard). Otherwise hekate UMS: delete
   `atmosphere/contents/4200000000004156/`.
 
+## 0.2.2 (`nsav6-*` jobs)
+
+- **The executable steps:** `ssbu-switch-remote-work/card-jobs/nsav6-s1-<sha>/STEPS.md`.
+- **What the hardware run proves:**
+  - (a) a normal SSBU boot with 0.2.2 running takes no ns action; its log shows `session start`,
+    `session end … clean=1` and `epoch: evidence=clean-session`;
+  - (b) the 0.2.1 paths are unchanged: probe X (0x4A8, not corrupt) → `gate=clear` → `took=1`; then the kill switch.
+- **What it doesn't prove:** the 4075 fast path is host-tested only until a natural recurrence. The module stays
+  installed and logs every decision with 2100, 2101, the flags and the strike state.
+- **Rollback:** `nsav6-rollback`. It can't delete `config/ns-autoverify/strike` (the card tool doesn't allow that
+  path); like `status.txt`, the file is inert without the module.
+
 ## Real-corruption safety
 
 The gate keeps the dialog whenever ns classifies the terminate result or the raw result as data corruption, and
@@ -58,3 +70,8 @@ whenever any query fails. The host tests cover every branch. On the console, P0'
 classifying fs corruption results as corrupt. A real corrupt-content crash cannot be produced safely: the console is
 internet-blocked, so there would be no redownload. So that case is covered by ns's own classification plus the
 fail-closed gate, not by a live test.
+
+0.2.2 makes one exception: the Rom hash-tree family (2002-4071..4079). It is cleared once per verified epoch. A
+repeat inside the epoch is kept, so persistent launch-path corruption reaches the dialog at its second occurrence.
+The residual risk is a rarely read bad block: a clean session in between re-arms the epoch, so each occurrence (each
+one a visible failure) can be cleared once. The log records every one.
