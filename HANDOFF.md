@@ -61,6 +61,27 @@
   `ssbu-switch-remote-work/card-jobs/nsav6-*` (S0 install with observe-only, T1 reproduce, T2 fast clear, T3 strike +
   system Check, T4 crash-trigger, rollback). The driver is switch-hw-devin-2. Nothing pushed.
 
+## Update 2026-11-18 05:1xZ: 0.2.2 implemented, built and staged (nsav-devin, after the primary's 04:44Z GO)
+
+- **Commit `c4356b4`** (local `main`, not pushed). Epoch rules as in the README:
+  - armed only by `clean-session` or `external-clear`;
+  - missing or garbled → `unarmed-keep`.
+- **Checks:** host tests 132/0; `make check-host` exit 0.
+- **Yoga build `build-c4356b4/`:** GCC 16.1.0 / libnx 4.12.0, 0 warnings.
+  - `exefs.nsp` `989090c01d7363b4bee8b83de4bb4066f7dec614e413b9efa59324818142678d` (101,457 B);
+  - `toolbox.json` `31a05378…`;
+  - `nsav-probe.nro` 0.4.0 `f58ff99890c40fdab7a34a732e6b4eaebe2b60b9a5672f188c7511bdc49f244f` (241,720 B).
+- **Jobs** (`ssbu-switch-remote-work/card-jobs/`): master `nsav6-s1-c4356b4/STEPS.md`, plus `nsav6-noflag`, `-off`,
+  `-rearm`, `-probe-out`, `-rollback` and `-s2-boot2` (Stage 2, needs its own go).
+  - All 8 steps dry-ran ok on a scratch card with `ssbu-switch-remote@70e7aa3` (ums), replacing a fake 0.2.1.
+  - The card tool can't remove `config/ns-autoverify/strike`; the rollback leaves it (inert).
+- **Size:** about +322 net product lines (main +175, policy +92, policy.h +38, probe +17) and +149 test lines, against
+  the approved ~150. Flagged to the primary.
+- **Hardware scope:** (a) no regression and no action, plus the session/epoch log lines; (b) the 0.2.1 clear
+  (probe X) and the kill switch. **The 4075 fast path is host-tested only.**
+- **Next:** the driver runs `nsav6-s1-c4356b4` when the console queue allows. Then read `$E=…/hw7/p` against the
+  pass table.
+
 ## Unknowns (P0 resolves them)
 
 - The `IsDataCorruptedResult` (2) and `GetRawApplicationTerminateResult` (2101) request layouts are assumed, with no
