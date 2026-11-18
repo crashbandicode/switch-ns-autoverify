@@ -39,6 +39,28 @@
 - **Next:** the controlled real-crash test, job `card-jobs/nsav3-crash-5d126774/STEPS.md`. The nsav2 jobs are
   superseded.
 
+## Update 2026-11-18 04:41Z: 0.2.2 design posted, waiting for the primary's GO (nsav-devin)
+
+- **Trigger:** hw6-natural (`smash-training-lobby/artifacts/switch-corrupt-dialog/hw6-natural/RESULT.md`).
+  - 0.2.1 kept `term=raw=0x1fd602` (ns: corrupt).
+  - The system Check then found no corruption.
+- **Decode:** 0x1fd602 = 2002-4075 `RomHierarchicalSha256HashVerificationFailed`, a SHA-256 hash-tree mismatch on a read. The
+  FS server raises 4535, and the RomFs layer renames it to 4075. With the Check passing, it was most likely a transient bad read.
+- **H2 now likely:** 2100 is non-zero only for corrupt-class results, and flags bit 13 (0x2000) is set with it. If so, 0.2.1's
+  non-corrupt clear path can never fire on a real dialog.
+- **Design** (inbox `phase23/INBOX-opus-rc6-integration.md`, `## 04:41Z … NSAV 0.2.2 DESIGN`):
+  - fast-clear 2002-4071..4079 once per "verified epoch" (`config/ns-autoverify/strike` file);
+  - a repeat inside the epoch → `strike-keep` for the system Check;
+  - an observed external clear (the Check) resets the epoch;
+  - wait on ns `ApplicationRecordUpdateSystemEvent`, with a 10 s poll;
+  - probe 0.4.0 adds ZL = Set(0x1FD602) when both values are 0.
+  - A targeted ExeFS verify was rejected: Code is not mountable via fsp-srv, and the failing section is unknown.
+- **erpt plan:** the 265 UUIDs new since 11-16 12:44Z are in `hw6-natural/erpt-new-since-1116-1244Z.txt`; parse them with
+  `hw6-natural/erpt_parse.py`.
+- **Next after GO:** implement in policy/main/probe plus host tests, then the Yoga build, then card jobs
+  `ssbu-switch-remote-work/card-jobs/nsav6-*` (S0 install with observe-only, T1 reproduce, T2 fast clear, T3 strike +
+  system Check, T4 crash-trigger, rollback). The driver is switch-hw-devin-2. Nothing pushed.
+
 ## Unknowns (P0 resolves them)
 
 - The `IsDataCorruptedResult` (2) and `GetRawApplicationTerminateResult` (2101) request layouts are assumed, with no
